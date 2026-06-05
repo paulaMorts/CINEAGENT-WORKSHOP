@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+chainlit
+boto3
+httpx
+pydantic
+python-dotenv
+pytest
+hypothesis
+pytest-asyncio

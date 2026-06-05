@@ -1,0 +1,23 @@
+# Credentials and secrets
+.env
+aws-workshop-credentials.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# Data persistence
+.data/
+
+# Chainlit
+.chainlit/
+
+# Testing
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
