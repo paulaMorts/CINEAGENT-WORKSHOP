@@ -8,3 +8,5 @@ python-dotenv
 pytest
 hypothesis
 pytest-asyncio
+bedrock-agentcore
+strands-agents

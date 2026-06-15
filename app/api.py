@@ -31,13 +31,13 @@ BEDROCK_TIMEOUT_SECONDS = 30
 
 
 def set_bedrock_client(client: object) -> None:
-    """Set the Bedrock client dependency for the API.
+    """Set the client dependency for the API.
 
     Call this at application startup to inject the initialized
-    BedrockClient instance.
+    client instance (AgentCoreClient or BedrockClient).
 
     Args:
-        client: An initialized BedrockClient instance.
+        client: An initialized client with a process_message() method.
     """
     global bedrock_client
     bedrock_client = client

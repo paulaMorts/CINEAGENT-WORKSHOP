@@ -16,6 +16,11 @@ class TestLoadConfigSuccess:
             "OMDB_API_KEY": "test-key-123",
             "AWS_REGION": "us-east-1",
             "BEDROCK_MODEL_ID": "anthropic.claude-3-sonnet-20240229-v1:0",
+            "AGENTCORE_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789:agent/abc123",
+            "AGENTCORE_REGION": "us-east-1",
+            "MEMORY_ID": "mem-abc123def456",
+            "GATEWAY_URL": "https://gw-id.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+            "GATEWAY_ACCESS_TOKEN": "test-token-xyz",
         }
         with patch("app.config.load_dotenv"):
             with patch.dict(os.environ, env, clear=True):
@@ -25,6 +30,11 @@ class TestLoadConfigSuccess:
         assert config.omdb_api_key == "test-key-123"
         assert config.aws_region == "us-east-1"
         assert config.bedrock_model_id == "anthropic.claude-3-sonnet-20240229-v1:0"
+        assert config.agentcore_runtime_arn == "arn:aws:bedrock-agentcore:us-east-1:123456789:agent/abc123"
+        assert config.agentcore_region == "us-east-1"
+        assert config.memory_id == "mem-abc123def456"
+        assert config.gateway_url == "https://gw-id.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+        assert config.gateway_access_token == "test-token-xyz"
 
 
 class TestLoadConfigMissingVars:

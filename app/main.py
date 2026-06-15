@@ -6,9 +6,8 @@ all backend components. Run with: chainlit run app/main.py
 
 On startup it:
 1. Loads configuration from environment variables
-2. Initializes the OMDb tool with the API key
-3. Initializes the Bedrock client with the region, model ID, and OMDb tool
-4. Wires the Bedrock client into the FastAPI app for the /chat endpoint
+2. Initializes either AgentCoreClient (if configured) or BedrockClient (fallback)
+3. Wires the client into the FastAPI app for the /chat endpoint
 
 The Chainlit handlers provide the chat UI, while the FastAPI /chat endpoint
 remains available for programmatic access.
@@ -19,11 +18,11 @@ import uuid
 from typing import Optional
 
 import chainlit as cl
+
 from app.api import app as fastapi_app, set_bedrock_client
-from app.bedrock_client import BedrockClient
 from app.config import load_config
 from app.data_layer import JSONDataLayer
-from app.omdb_tool import OMDbTool
+from app.observability import init_tracing
 
 logger = logging.getLogger(__name__)
 
@@ -33,29 +32,46 @@ logger = logging.getLogger(__name__)
 # If any required variable is missing, this will log an error and exit.
 config = load_config()
 
-# Initialize the OMDb tool with the API key from config
-omdb_tool = OMDbTool(api_key=config.omdb_api_key)
+# Initialize observability (tracing)
+init_tracing()
 
-# Initialize the Bedrock client with region, model ID, and the OMDb tool
-bedrock_client = BedrockClient(
-    region=config.aws_region,
-    model_id=config.bedrock_model_id,
-    omdb_tool=omdb_tool,
-)
+# Initialize the appropriate client based on configuration
+if config.use_agentcore:
+    # AgentCore mode: use the deployed Runtime agent
+    from app.agentcore_client import AgentCoreClient
 
-# Wire the Bedrock client into the FastAPI /chat endpoint
+    bedrock_client = AgentCoreClient(
+        runtime_arn=config.agentcore_runtime_arn,
+        region=config.agentcore_region,
+    )
+    logger.info(
+        "CineAgent initialized (AgentCore mode): runtime_arn=%s",
+        config.agentcore_runtime_arn,
+    )
+else:
+    # Direct Bedrock mode: call Converse API directly (original architecture)
+    from app.bedrock_client import BedrockClient
+    from app.omdb_tool import OMDbTool
+
+    omdb_tool = OMDbTool(api_key=config.omdb_api_key)
+    bedrock_client = BedrockClient(
+        region=config.aws_region,
+        model_id=config.bedrock_model_id,
+        omdb_tool=omdb_tool,
+    )
+    logger.info(
+        "CineAgent initialized (Direct Bedrock mode): region=%s, model=%s",
+        config.aws_region,
+        config.bedrock_model_id,
+    )
+
+# Wire the client into the FastAPI /chat endpoint
 set_bedrock_client(bedrock_client)
 
 # Initialize the data layer for conversation history persistence
 @cl.data_layer
 def get_data_layer():
     return JSONDataLayer()
-
-logger.info(
-    "CineAgent initialized: region=%s, model=%s",
-    config.aws_region,
-    config.bedrock_model_id,
-)
 
 
 # --- Authentication (required for conversation history) ---
@@ -90,10 +106,8 @@ async def on_chat_start():
 async def on_message(message: cl.Message):
     """Handle an incoming user message.
 
-    Sends the user query directly to the Bedrock client (not via HTTP),
+    Sends the user query to the configured client (AgentCore or direct Bedrock),
     then displays the assistant response in the chat thread.
-    Chainlit automatically shows a loading indicator while this async
-    handler is running.
 
     Args:
         message: The incoming Chainlit message from the user.
@@ -107,7 +121,6 @@ async def on_message(message: cl.Message):
         print(f"[CINEAGENT] Created fallback session_id={session_id}")
 
     try:
-        # Call Bedrock client directly (not via HTTP endpoint)
         response_text = await bedrock_client.process_message(
             query=message.content,
             session_id=session_id,

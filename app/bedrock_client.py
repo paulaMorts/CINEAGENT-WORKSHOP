@@ -4,6 +4,8 @@ Bedrock Client for CineAgent.
 Manages communication with Amazon Bedrock's Converse API, including
 the tool-use loop for OMDb lookups. Maintains per-session conversation
 history and enforces a 20-message limit.
+
+Includes OpenTelemetry tracing for observability.
 """
 
 import asyncio
@@ -13,9 +15,11 @@ from typing import Any, Dict, List
 
 import boto3
 
+from app.observability import get_tracer
 from app.omdb_tool import OMDbTool
 
 logger = logging.getLogger(__name__)
+tracer = get_tracer("bedrock-client")
 
 # Maximum number of messages to keep in conversation history per session
 MAX_HISTORY_MESSAGES = 20
@@ -108,81 +112,89 @@ class BedrockClient:
         Returns:
             The assistant's text response.
         """
-        # Reset poster URLs for this request
-        self.last_posters = []
+        with tracer.start_as_current_span("process_message") as span:
+            span.set_attribute("session.id", session_id)
+            span.set_attribute("model.id", self.model_id)
+            span.set_attribute("query.length", len(query))
 
-        # Get or create session history
-        if session_id not in self.sessions:
-            self.sessions[session_id] = []
+            # Reset poster URLs for this request
+            self.last_posters = []
 
-        history = self.sessions[session_id]
+            # Get or create session history
+            if session_id not in self.sessions:
+                self.sessions[session_id] = []
 
-        # Add user message to history
-        user_message = {"role": "user", "content": [{"text": query}]}
-        history.append(user_message)
+            history = self.sessions[session_id]
 
-        # Build messages list from history
-        messages = list(history)
+            # Add user message to history
+            user_message = {"role": "user", "content": [{"text": query}]}
+            history.append(user_message)
 
-        # Call Bedrock Converse API in a loop to handle multiple tool calls
-        while True:
-            response = await self._call_converse_async(messages)
+            # Build messages list from history
+            messages = list(history)
 
-            stop_reason = response["stopReason"]
-            assistant_message = response["output"]["message"]
+            # Call Bedrock Converse API in a loop to handle multiple tool calls
+            while True:
+                with tracer.start_as_current_span("bedrock_converse") as converse_span:
+                    response = await self._call_converse_async(messages)
+                    converse_span.set_attribute("stop_reason", response["stopReason"])
 
-            # Add assistant response to messages for potential follow-up
-            messages.append(assistant_message)
+                stop_reason = response["stopReason"]
+                assistant_message = response["output"]["message"]
 
-            if stop_reason == "tool_use":
-                # Extract tool use blocks and process each one
-                tool_result_content = []
-                for block in assistant_message["content"]:
-                    if "toolUse" in block:
-                        tool_use = block["toolUse"]
-                        tool_name = tool_use["name"]
-                        tool_input = tool_use["input"]
-                        tool_use_id = tool_use["toolUseId"]
+                # Add assistant response to messages for potential follow-up
+                messages.append(assistant_message)
 
-                        # Call the OMDb tool
-                        tool_result = await self._handle_tool_call(
-                            tool_name, tool_input
-                        )
+                if stop_reason == "tool_use":
+                    # Extract tool use blocks and process each one
+                    tool_result_content = []
+                    for block in assistant_message["content"]:
+                        if "toolUse" in block:
+                            tool_use = block["toolUse"]
+                            tool_name = tool_use["name"]
+                            tool_input = tool_use["input"]
+                            tool_use_id = tool_use["toolUseId"]
 
-                        tool_result_content.append(
-                            {
-                                "toolResult": {
-                                    "toolUseId": tool_use_id,
-                                    "content": [{"json": tool_result}],
+                            # Call the OMDb tool
+                            tool_result = await self._handle_tool_call(
+                                tool_name, tool_input
+                            )
+
+                            tool_result_content.append(
+                                {
+                                    "toolResult": {
+                                        "toolUseId": tool_use_id,
+                                        "content": [{"json": tool_result}],
+                                    }
                                 }
-                            }
-                        )
+                            )
 
-                # Add tool results as a user message and continue the loop
-                tool_result_message = {
-                    "role": "user",
-                    "content": tool_result_content,
-                }
-                messages.append(tool_result_message)
+                    # Add tool results as a user message and continue the loop
+                    tool_result_message = {
+                        "role": "user",
+                        "content": tool_result_content,
+                    }
+                    messages.append(tool_result_message)
 
-            elif stop_reason == "end_turn":
-                # Extract text from the assistant's response
-                response_text = self._extract_text(assistant_message)
+                elif stop_reason == "end_turn":
+                    # Extract text from the assistant's response
+                    response_text = self._extract_text(assistant_message)
 
-                # Store assistant message in session history
-                history.append(assistant_message)
+                    # Store assistant message in session history
+                    history.append(assistant_message)
 
-                # Enforce history limit (keep most recent messages)
-                self._trim_history(session_id)
+                    # Enforce history limit (keep most recent messages)
+                    self._trim_history(session_id)
 
-                return response_text
+                    span.set_attribute("response.length", len(response_text))
+                    return response_text
 
-            else:
-                # Unexpected stop reason — extract whatever text is available
-                response_text = self._extract_text(assistant_message)
-                history.append(assistant_message)
-                self._trim_history(session_id)
-                return response_text
+                else:
+                    # Unexpected stop reason — extract whatever text is available
+                    response_text = self._extract_text(assistant_message)
+                    history.append(assistant_message)
+                    self._trim_history(session_id)
+                    return response_text
 
     def _call_converse(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Call the Bedrock Converse API (synchronous).
@@ -229,30 +241,37 @@ class BedrockClient:
         Returns:
             A dictionary with the tool result for Bedrock.
         """
-        if tool_name == "search_movie":
-            title = tool_input.get("title", "")
-            result = await self.omdb_tool.search_by_title(title)
+        with tracer.start_as_current_span("tool_call") as span:
+            span.set_attribute("tool.name", tool_name)
+            span.set_attribute("tool.input", str(tool_input))
 
-            # Collect poster URL if available
-            if result.success and result.poster:
-                self.last_posters.append(result.poster)
+            if tool_name == "search_movie":
+                title = tool_input.get("title", "")
+                span.set_attribute("omdb.title", title)
+                result = await self.omdb_tool.search_by_title(title)
 
-            # Convert OMDbResult to a dictionary for Bedrock
-            return {
-                "success": result.success,
-                "title": result.title,
-                "year": result.year,
-                "plot": result.plot,
-                "genre": result.genre,
-                "ratings": result.ratings,
-                "content_type": result.content_type,
-                "total_seasons": result.total_seasons,
-                "poster": result.poster,
-                "error": result.error,
-            }
-        else:
-            logger.warning("Unknown tool requested: %s", tool_name)
-            return {"error": f"Unknown tool: {tool_name}"}
+                # Collect poster URL if available
+                if result.success and result.poster:
+                    self.last_posters.append(result.poster)
+
+                span.set_attribute("omdb.success", result.success)
+
+                # Convert OMDbResult to a dictionary for Bedrock
+                return {
+                    "success": result.success,
+                    "title": result.title,
+                    "year": result.year,
+                    "plot": result.plot,
+                    "genre": result.genre,
+                    "ratings": result.ratings,
+                    "content_type": result.content_type,
+                    "total_seasons": result.total_seasons,
+                    "poster": result.poster,
+                    "error": result.error,
+                }
+            else:
+                logger.warning("Unknown tool requested: %s", tool_name)
+                return {"error": f"Unknown tool: {tool_name}"}
 
     def _extract_text(self, message: Dict[str, Any]) -> str:
         """Extract text content from an assistant message.
